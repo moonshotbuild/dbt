@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use dbt_common::io_args::FsCommand;
+pub use dbt_tasks_core::CompiledSqlCache;
 
 /// Common configuration for compilation pipeline
 #[derive(Clone)]
@@ -18,6 +21,15 @@ pub struct CompilationConfig {
     pub use_full_schema_store: bool,
     /// Whether to return freed heap memory to the OS after parsing
     pub release_free_heap_after_parse: bool,
+    /// Cache for compiled (rendered) SQL. When `None`, the default
+    /// disk-backed cache is used, which writes compiled SQL under the
+    /// project's target directory (`<out_dir>/compiled/...`).
+    /// Embedding hosts can supply an in-memory implementation so compilation
+    /// never writes into the user's target directory.
+    ///
+    /// Only consulted when there is no previous cache state - once tasks have run,
+    /// the resolved cache is carried forward via the compilation cache state.
+    pub compiled_sql_cache: Option<Arc<dyn CompiledSqlCache>>,
 }
 
 impl Default for CompilationConfig {
@@ -37,6 +49,7 @@ impl Default for CompilationConfig {
             no_version_check: false,
             use_full_schema_store: false,
             release_free_heap_after_parse: true,
+            compiled_sql_cache: None,
         }
     }
 }
