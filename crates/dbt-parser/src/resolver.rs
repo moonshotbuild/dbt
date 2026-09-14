@@ -1033,8 +1033,12 @@ pub async fn resolve_inner(
     // kinds read them.
     let model_properties = take_model_entries(&mut properties, &jinja_env, &base_ctx)?;
 
+    // Skip creating the `generic_tests` directory when an in-memory ScratchFs is
+    // installed -- the generated test SQL goes there, so no directory is needed.
     let dbt_tests_dir = arg.io.out_dir.join(DBT_GENERIC_TESTS_DIR_NAME);
-    stdfs::create_dir_all(&dbt_tests_dir)?;
+    if arg.io.scratch_fs.is_none() {
+        stdfs::create_dir_all(&dbt_tests_dir)?;
+    }
 
     let dependency_package_name = dependency_package_name_from_ctx(&jinja_env, &base_ctx);
     let mut typed_models_properties: BTreeMap<String, ModelProperties> = BTreeMap::new();
