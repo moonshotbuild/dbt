@@ -37,6 +37,11 @@ impl TestProject {
         Self { _tmp: tmp, root }
     }
 
+    /// A sibling directory, outside the project, that must stay untouched.
+    fn outside(&self) -> PathBuf {
+        self.root.parent().unwrap().join("outside")
+    }
+
     /// Create a sibling package directory `dir` and declare it in `packages.yml`.
     fn with_local_package(&self, dir: &str, project_yml: &str) {
         let package_root = self.root.parent().unwrap().join(dir);
@@ -169,4 +174,40 @@ async fn a_current_dir_package_name_fails_deps_and_deletes_nothing() {
 #[tokio::test]
 async fn a_nested_package_name_fails_deps_and_deletes_nothing() {
     assert_name_is_rejected("nested/pkg").await;
+}
+
+/// A `local:` package is staged as a symlink at `<scratch>/<name>` before
+/// `install_packages` checks the name, so an absolute name must be refused
+/// when it is staged, or the symlink lands outside the project.
+#[tokio::test]
+async fn an_absolute_local_package_name_writes_nothing_outside() {
+    let project = TestProject::new();
+    fs::create_dir_all(project.outside()).unwrap();
+    let escape = project.outside().join("pwned");
+    project.with_local_package(
+        "pkg",
+        &format!("name: \"{}\"\nprofile: default\n", escape.display()),
+    );
+
+    let err = project.try_deps().await.expect_err("deps must fail");
+
+    assert!(
+        err.to_string().contains("Invalid package name"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        escape.symlink_metadata().is_err(),
+        "package landed outside the project"
+    );
+}
+
+#[tokio::test]
+async fn a_parent_traversing_local_package_name_writes_nothing_outside() {
+    let project = TestProject::new();
+    project.with_local_package("pkg", "name: \"../../outside/pwned\"\nprofile: default\n");
+
+    let err = project.try_deps().await.expect_err("deps must fail");
+
+    assert!(err.to_string().contains("Invalid package name"), "{err}");
+    assert!(!project.outside().exists());
 }
