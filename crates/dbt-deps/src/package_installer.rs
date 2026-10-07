@@ -147,7 +147,7 @@ impl PackageInstaller for HubUnpinnedPackage {
         )?;
 
         let scratch = make_tempdir(Some(dest))?;
-        let path = scratch.path().join(&metadata.name);
+        let path = install_target(scratch.path(), &metadata.name)?;
         ensure_dir(&path).await?;
         ctx.tarball_client
             .download_and_extract_tarball(
@@ -165,6 +165,48 @@ impl PackageInstaller for HubUnpinnedPackage {
             path,
             _scratch: scratch,
         })
+    }
+}
+
+/// The path a package is staged at: `dest/<name>`, where `dest` is the
+/// installer's scratch dir and `name` is the package's self-declared
+/// `dbt_project.yml` `name:` (or the Hub's name for it).
+///
+/// That name is attacker-controlled for a local package, and `Path::join`
+/// discards `dest` for an absolute name and walks out of it for a `..` one,
+/// so the staging write (a symlink, or an extracted tarball) could land
+/// anywhere on the machine. `install_packages` checks each name again, but
+/// only after every package is staged. A project name is a single path
+/// component by definition, so refuse anything else and check the join
+/// stayed under `dest`.
+fn install_target(dest: &Path, name: &str) -> FsResult<std::path::PathBuf> {
+    validate_package_name(name).map_err(|e| fs_err!(ErrorCode::InvalidConfig, "{}", e))?;
+    let target = dest.join(name);
+    if target.parent() != Some(dest) {
+        return Err(fs_err!(
+            ErrorCode::InvalidConfig,
+            "Package name '{name}' does not resolve to a directory under {}",
+            dest.display()
+        ));
+    }
+    Ok(target)
+}
+
+/// Validate that a package name is a single, normal path component.
+fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Invalid package name: must not be empty".to_string());
+    }
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None)
+            if !name.contains('/') && !name.contains('\\') && !name.contains('\0') =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "Invalid package name '{name}': must be a single directory name, not a path"
+        )),
     }
 }
 
@@ -311,7 +353,7 @@ impl PackageInstaller for LocalUnpinnedPackage {
         let package_path = ctx.io.in_dir.join(&self.local);
         let name = self.name.clone();
         let scratch = make_tempdir(Some(dest))?;
-        let path = scratch.path().join(&name);
+        let path = install_target(scratch.path(), &name)?;
         // Relative to `dest`, not the scratch dir: the link only resolves once
         // `install_packages` moves it to `<dest>/<name>`.
         let relative_package_path = stdfs::diff_paths(&package_path, dest)?;
@@ -414,6 +456,31 @@ impl UnpinnedPackage {
             UnpinnedPackage::Local(p) => p.install(ctx, dest).await,
             UnpinnedPackage::Private(p) => p.install(ctx, dest).await,
             UnpinnedPackage::Tarball(p) => p.install(ctx, dest).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod install_target_tests {
+    use super::*;
+
+    #[test]
+    fn install_target_accepts_a_name_and_rejects_a_path() {
+        let dest = Path::new("/proj/dbt_packages");
+        for ok in ["dbt_utils", "my-pkg", "pkg.v2"] {
+            assert_eq!(install_target(dest, ok).unwrap(), dest.join(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../pwned",
+            "a/b",
+            "/tmp/pwned",
+            "C:\\pwned",
+            "x\0y",
+        ] {
+            assert!(install_target(dest, bad).is_err(), "{bad:?}");
         }
     }
 }
