@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Component, Path};
 
+use dbt_common::path::DbtPath;
 use dbt_common::tracing::dbt_emit::emit_info_log_message;
 use dbt_common::tracing::span_info::find_and_update_span_attrs;
 use dbt_common::{ErrorCode, FsResult, constants::DBT_PACKAGES_LOCK_FILE, fs_err, stdfs};
@@ -12,6 +13,25 @@ use crate::context::DepsOperationContext;
 use crate::package_installer::StagedPackage;
 use crate::package_listing::{PackageListing, UnpinnedPackage};
 use crate::utils::{max_resolve_concurrency, scrub_package_name_secret_env_vars};
+
+/// Refuse an install directory that is not inside the project.
+///
+/// `install_packages` removes every entry in the directory that the lock does
+/// not list, so this is the last check between a `packages-install-path` of
+/// `../OUTSIDE` (or an absolute path) and the deletion of what is there.
+pub(crate) fn ensure_inside_project(install_path: &Path, in_dir: &Path) -> FsResult<()> {
+    let root = DbtPath::absolute(in_dir)?;
+    let resolved = DbtPath::absolute(install_path)?;
+    if !resolved.as_path().starts_with(root.as_path()) || resolved.as_path() == root.as_path() {
+        return Err(fs_err!(
+            ErrorCode::InvalidConfig,
+            "Refusing to use packages install path '{}': it is not inside the project directory {}",
+            install_path.display(),
+            in_dir.display()
+        ));
+    }
+    Ok(())
+}
 
 fn package_lock_needs_scrub(package: &DbtPackageLock) -> bool {
     match package {
@@ -69,6 +89,7 @@ pub async fn install_packages(
     } else {
         dbt_yaml::to_string(dbt_packages_lock).unwrap()
     };
+    ensure_inside_project(packages_install_path, &ctx.io.in_dir)?;
     stdfs::create_dir_all(packages_install_path)?;
 
     let mut package_listing = PackageListing::new(ctx.io.clone(), ctx.vars.clone(), &ctx.notices)
@@ -188,4 +209,21 @@ async fn install_packages_concurrent(
         );
     }
     Ok(staged)
+}
+
+#[cfg(test)]
+mod install_path_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_inside_project_rejects_an_escape() {
+        let in_dir = Path::new("/proj");
+        assert!(ensure_inside_project(Path::new("/proj/dbt_packages"), in_dir).is_ok());
+        assert!(ensure_inside_project(Path::new("/proj/vendor/pkgs"), in_dir).is_ok());
+        assert!(ensure_inside_project(Path::new("/proj/../OUTSIDE"), in_dir).is_err());
+        assert!(ensure_inside_project(Path::new("/proj/a/../../OUTSIDE"), in_dir).is_err());
+        assert!(ensure_inside_project(Path::new("/tmp/OUTSIDE"), in_dir).is_err());
+        assert!(ensure_inside_project(Path::new("/proj"), in_dir).is_err());
+        assert!(ensure_inside_project(Path::new("/project2"), in_dir).is_err());
+    }
 }
