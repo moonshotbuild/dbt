@@ -9,7 +9,7 @@ use adbc_core::{
 use core::str;
 use dirs;
 use ini::ini;
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use std::fmt;
 use url::Url;
 
@@ -337,6 +337,14 @@ impl Builder {
     }
 }
 
+/// Everything but the RFC 3986 unreserved characters, for a value in a
+/// libpq connection URI's query.
+const QUERY_VALUE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 impl IntoIterator for Builder {
     type Item = (OptionDatabase, OptionValue);
     type IntoIter = BuilderIter<OptionDatabase, 3>;
@@ -349,13 +357,19 @@ impl IntoIterator for Builder {
                 let mut uri = self
                     .uri
                     .unwrap_or_else(|| Url::parse("postgres://").unwrap());
-                {
-                    let mut query = uri.query_pairs_mut();
-                    if let Some(username) = self.username {
-                        query.append_pair("user", &username);
-                    }
-                    if let Some(password) = self.password {
-                        query.append_pair("password", &password);
+                // Percent-encode rather than form-encode (`query_pairs_mut`):
+                // libpq does not decode `+` as a space, so a password with a
+                // space would reach the server with a `+` in its place.
+                let credentials = [("user", self.username), ("password", self.password)];
+                for (key, value) in credentials {
+                    if let Some(value) = value {
+                        let pair =
+                            format!("{key}={}", utf8_percent_encode(&value, QUERY_VALUE_SET));
+                        let query = match uri.query() {
+                            Some(query) if !query.is_empty() => format!("{query}&{pair}"),
+                            _ => pair,
+                        };
+                        uri.set_query(Some(&query));
                     }
                 }
                 [
@@ -461,6 +475,23 @@ mod tests {
         assert!(uri.starts_with("postgres://db.example/app?"));
         assert!(uri.contains("user=alice"));
         assert!(uri.contains("password=secret"));
+    }
+
+    #[test]
+    fn postgres_credentials_are_percent_encoded_not_form_encoded() {
+        let mut builder = Builder::new(Backend::Postgres);
+        builder
+            .with_parse_uri("postgresql://db.example/app?sslmode=require")
+            .unwrap()
+            .with_username("al ice")
+            .with_password("p w+&=%");
+
+        let options = builder.into_iter().collect::<Vec<_>>();
+        let uri = option_string(&options[0].1);
+        assert_eq!(
+            uri,
+            "postgresql://db.example/app?sslmode=require&user=al%20ice&password=p%20w%2B%26%3D%25"
+        );
     }
 
     #[test]
