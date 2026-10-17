@@ -215,7 +215,8 @@ impl TypeOps for DefaultTypeOps {
         let adapter_type = self.0;
         match adapter_type {
             Bigquery => bigquery::try_format_type(data_type, nullable, out),
-            Postgres | Salesforce => postgres::try_format_type(data_type, nullable, out),
+            Postgres => postgres::try_format_type(data_type, nullable, out),
+            Salesforce => postgres::try_format_type_salesforce(data_type, nullable, out),
             Fabric => fabric::try_format_type(data_type, nullable, out),
             ClickHouse => clickhouse::try_format_type(data_type, nullable, out),
             _ => {
@@ -876,13 +877,52 @@ pub mod postgres {
     use crate::AdapterResult;
     use crate::errors::{AdapterError, AdapterErrorKind};
 
+    /// Writes `datatype` as a Postgres type name, as used in DDL and casts.
     pub fn try_format_type(
         datatype: &DataType,
         nullable: bool,
         out: &mut String,
     ) -> AdapterResult<()> {
+        format_type(datatype, nullable, true, out)
+    }
+
+    /// Salesforce shares the Postgres names, but keeps the spellings it had
+    /// before the Postgres-only corrections in [`format_type`], which were
+    /// checked against PostgreSQL alone.
+    pub fn try_format_type_salesforce(
+        datatype: &DataType,
+        nullable: bool,
+        out: &mut String,
+    ) -> AdapterResult<()> {
+        format_type(datatype, nullable, false, out)
+    }
+
+    /// `native` selects names PostgreSQL accepts where the shared spelling is
+    /// not a Postgres type (`tinyint`, `double`, `binary`, `array`, `null`),
+    /// widens unsigned integers to a type that holds their range, and keeps a
+    /// timestamp's zone.
+    fn format_type(
+        datatype: &DataType,
+        nullable: bool,
+        native: bool,
+        out: &mut String,
+    ) -> AdapterResult<()> {
         use std::fmt::Write as _;
         match datatype {
+            DataType::Null if native => out.push_str("text"),
+            DataType::Int8 | DataType::UInt8 if native => out.push_str("smallint"),
+            DataType::UInt16 if native => out.push_str("integer"),
+            DataType::UInt32 if native => out.push_str("bigint"),
+            DataType::UInt64 if native => out.push_str("numeric(20, 0)"),
+            DataType::Float64 if native => out.push_str("float8"),
+            DataType::Timestamp(_, Some(_)) if native => out.push_str("timestamp with time zone"),
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView if native => {
+                out.push_str("bytea")
+            }
+            DataType::List(item) | DataType::LargeList(item) if native => {
+                format_type(item.data_type(), true, true, out)?;
+                out.push_str("[]");
+            }
             DataType::Null => out.push_str("null"),
             DataType::Boolean => out.push_str("boolean"),
             DataType::Int8 => out.push_str("tinyint"),
@@ -1642,6 +1682,65 @@ mod tests {
         ops.write_sql_type_for_dbt_convert_functions(data_type, &mut out)
             .unwrap();
         out
+    }
+
+    fn format_sql_type(data_type: &DataType, nullable: bool, adapter_type: AdapterType) -> String {
+        let mut out = String::new();
+        DefaultTypeOps::new(adapter_type)
+            .format_arrow_type_as_sql(data_type, nullable, &mut out)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn postgres_type_names_are_postgres_types() {
+        use std::sync::Arc;
+        let item = |dt: DataType| Arc::new(Field::new("item", dt, true));
+        for (data_type, expected) in [
+            (DataType::Null, "text"),
+            (DataType::Int8, "smallint"),
+            (DataType::UInt8, "smallint"),
+            (DataType::UInt16, "integer"),
+            (DataType::UInt32, "bigint"),
+            (DataType::UInt64, "numeric(20, 0)"),
+            (DataType::Float64, "float8"),
+            (DataType::Binary, "bytea"),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                "timestamp without time zone",
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                "timestamp with time zone",
+            ),
+            (DataType::List(item(DataType::Int32)), "integer[]"),
+            (
+                DataType::List(item(DataType::List(item(DataType::Utf8)))),
+                "character varying[][]",
+            ),
+        ] {
+            assert_eq!(
+                format_sql_type(&data_type, true, Postgres),
+                expected,
+                "{data_type}"
+            );
+        }
+        assert_eq!(
+            format_sql_type(&DataType::List(item(DataType::Float64)), false, Postgres),
+            "float8[] not null"
+        );
+    }
+
+    #[test]
+    fn salesforce_keeps_its_type_names() {
+        assert_eq!(
+            format_sql_type(&DataType::Float64, true, Salesforce),
+            "double"
+        );
+        assert_eq!(
+            format_sql_type(&DataType::Int8, true, Salesforce),
+            "tinyint"
+        );
     }
 
     #[test]
