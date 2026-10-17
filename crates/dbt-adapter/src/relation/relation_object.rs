@@ -353,7 +353,7 @@ impl Object for RelationObject {
             "is_hive_metastore" => Ok(Value::from(self.is_hive_metastore())),
             "enrich" => self.relation_enrich(args),
             "render_constraints_for_create" => self.relation_render_constraints_for_create(),
-            // Below are available for BigQuery and Redshift
+            // Below are available for BigQuery, Postgres and Redshift
             "materialized_view_config_changeset" => {
                 let iter = ArgsIter::new(
                     "materialized_view_config_changeset",
