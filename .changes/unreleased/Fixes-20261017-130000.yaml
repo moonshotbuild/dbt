@@ -1,0 +1,8 @@
+kind: Fixes
+body: Implement adapter.parse_index for Postgres and DuckDB, so a model with an
+    indexes config creates its indexes instead of panicking.
+time: 2026-10-17T13:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
