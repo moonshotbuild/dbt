@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use dbt_adapter_core::AdapterType;
-use dbt_adbc::Connection;
 use dbt_adbc::duration::parse_duration;
 use dbt_auth::AdapterConfig;
 use dbt_common::Cancellable;
 use dbt_common::tracing::dbt_emit::emit_info_log_message;
 
 mod databricks;
+mod postgres;
 mod redshift;
 mod snowflake;
 
@@ -76,6 +76,8 @@ impl ConnectionRetryPolicy {
         let retries_key = match adapter_type {
             // https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-redshift/src/dbt/adapters/redshift/connections.py#L149-L150
             AdapterType::Redshift => "retries",
+            // https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-postgres/src/dbt/adapters/postgres/connections.py#L236
+            AdapterType::Postgres => "retries",
             _ => "connect_retries",
         };
         let max_retries = config
@@ -118,11 +120,11 @@ impl ConnectionRetryPolicy {
     /// - the connect succeeds,
     /// - `attempt >= self.max_retries`, or
     /// - the error is not retryable per [`is_retryable`](Self::is_retryable).
-    pub fn execute(
+    pub fn execute<T>(
         &self,
         config: &AdapterConfig,
-        connect_fn: impl FnMut() -> adbc_core::error::Result<Box<dyn Connection>>,
-    ) -> adbc_core::error::Result<Box<dyn Connection>> {
+        connect_fn: impl FnMut() -> adbc_core::error::Result<T>,
+    ) -> adbc_core::error::Result<T> {
         let total_attempts = self.max_retries.saturating_add(1);
         retry_loop(
             self.max_retries,
@@ -163,6 +165,7 @@ impl ConnectionRetryPolicy {
             Snowflake => snowflake::is_retryable_snowflake_login_error(config, err),
             Databricks => databricks::is_retryable_databricks_error(config, err),
             Redshift => redshift::is_retryable_redshift_login_error(config, err),
+            Postgres => postgres::is_retryable_postgres_login_error(config, err),
             // Other adapters don't have a retryable-error criteria implemented here yet.
             _ => false,
         }
@@ -432,7 +435,7 @@ mod tests {
         let policy = test_policy(3, Some(Duration::ZERO));
         let cfg = cfg_default();
         let mut calls: u32 = 0;
-        let result = policy.execute(&cfg, || {
+        let result = policy.execute::<()>(&cfg, || {
             calls += 1;
             Err(adbc_err(Status::IO, "i/o timeout"))
         });
@@ -446,7 +449,7 @@ mod tests {
         let policy = test_policy(5, Some(Duration::ZERO));
         let cfg = cfg_default();
         let mut calls: u32 = 0;
-        let result = policy.execute(&cfg, || {
+        let result = policy.execute::<()>(&cfg, || {
             calls += 1;
             Err(adbc_err(Status::Unauthenticated, "bad creds"))
         });
@@ -463,7 +466,7 @@ mod tests {
         let cfg = cfg_default();
         let mut calls: u32 = 0;
         let start = Instant::now();
-        let _ = policy.execute(&cfg, || {
+        let _ = policy.execute::<()>(&cfg, || {
             calls += 1;
             Err(adbc_err(Status::IO, "i/o timeout"))
         });
@@ -581,6 +584,24 @@ mod tests {
         assert_eq!(
             ConnectionRetryPolicy::new(AdapterType::Redshift, &cfg).max_retries,
             2
+        );
+    }
+
+    #[test]
+    fn postgres_uses_retries_and_ignores_connect_retries() {
+        let mapping = dbt_yaml::Mapping::from_iter([
+            ("connect_retries".into(), 5.into()),
+            ("retries".into(), 3.into()),
+        ]);
+        let cfg = AdapterConfig::new(mapping);
+        assert_eq!(
+            ConnectionRetryPolicy::new(AdapterType::Postgres, &cfg).max_retries,
+            3
+        );
+        let cfg = AdapterConfig::new(dbt_yaml::Mapping::new());
+        assert_eq!(
+            ConnectionRetryPolicy::new(AdapterType::Postgres, &cfg).max_retries,
+            1
         );
     }
 
