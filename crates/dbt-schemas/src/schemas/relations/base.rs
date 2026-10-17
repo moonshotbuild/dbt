@@ -926,6 +926,6 @@ pub trait BaseRelation: BaseRelationProperties + Any + Send + Sync + fmt::Debug 
         _relation_results: &Value,
         _relation_config: &Value,
     ) -> Result<Value, MinijinjaError> {
-        unimplemented!("Available only for BigQuery and Redshift")
+        unimplemented!("Available only for BigQuery, Postgres and Redshift")
     }
 }
