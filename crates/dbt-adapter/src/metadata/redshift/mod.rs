@@ -34,7 +34,9 @@ use crate::metadata::list_objects::*;
 /// (`dbt-loader/src/dbt_macro_assets/dbt-redshift/macros/relations.sql`).
 /// Inlined because the async hydration path in `dbt-precompile` has no Jinja
 /// `&State` to drive `execute_macro`.
-const REDSHIFT_GET_RELATIONS_SQL: &str = r#"
+/// Dependency edges between relations, from `pg_depend` and `pg_rewrite`.
+/// Plain `pg_catalog`, so Postgres runs it too.
+pub(crate) const REDSHIFT_GET_RELATIONS_SQL: &str = r#"
 with relation as (
     select
         pg_class.oid as relation_id,
