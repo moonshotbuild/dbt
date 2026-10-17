@@ -2962,12 +2962,9 @@ impl AdapterImpl {
         use ConstraintType::*;
 
         match (self.adapter_type(), ct) {
-            // Postgres
-            (Postgres, NotNull) => Enforced,
-            (Postgres, ForeignKey) => Enforced,
-            (Postgres, Unique) => NotEnforced,
-            (Postgres, PrimaryKey) => NotEnforced,
-            (Postgres, Check) => NotSupported,
+            // Postgres enforces all five
+            // https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-postgres/src/dbt/adapters/postgres/impl.py#L89-L95
+            (Postgres, NotNull | ForeignKey | Unique | PrimaryKey | Check) => Enforced,
             (Postgres, Custom) => NotSupported,
 
             // Snowflake
@@ -3006,12 +3003,9 @@ impl AdapterImpl {
             (Redshift, Check) => NotSupported,
             (Redshift, Custom) => NotSupported,
 
-            // DuckDB - follows Postgres
-            (DuckDB, NotNull) => Enforced,
-            (DuckDB, ForeignKey) => Enforced,
-            (DuckDB, Unique) => NotEnforced,
-            (DuckDB, PrimaryKey) => NotEnforced,
-            (DuckDB, Check) => NotSupported,
+            // DuckDB enforces all five too
+            // https://github.com/duckdb/dbt-duckdb/blob/master/dbt/adapters/duckdb/impl.py
+            (DuckDB, NotNull | ForeignKey | Unique | PrimaryKey | Check) => Enforced,
             (DuckDB, Custom) => NotSupported,
 
             // Lake compute - follows DuckDB
@@ -6519,7 +6513,7 @@ mod tests {
                     ("attach".into(), attach),
                 ])
             }
-            Bigquery | Redshift | Spark | Databricks => Mapping::new(),
+            Bigquery | Redshift | Spark | Databricks | Postgres => Mapping::new(),
             _ => unimplemented!("mock config for adapter type {:?}", adapter_type),
         };
         build_engine(adapter_type, config)
@@ -8117,6 +8111,29 @@ mod tests {
             Arc::new(DefaultTypeOps::new(ClickHouse)),
             Arc::new(DefaultStmtSplitter),
         )
+    }
+
+    /// dbt-postgres and dbt-duckdb override the base CONSTRAINT_SUPPORT to
+    /// enforce all five types, so a check constraint is rendered and no
+    /// "not enforced" warning fires for unique or primary_key.
+    #[test]
+    fn test_constraint_support_postgres_and_duckdb() {
+        for adapter_type in [Postgres, DuckDB] {
+            let adapter = AdapterImpl::new(engine(adapter_type), None);
+            for ct in [
+                ConstraintType::NotNull,
+                ConstraintType::Unique,
+                ConstraintType::PrimaryKey,
+                ConstraintType::ForeignKey,
+                ConstraintType::Check,
+            ] {
+                assert_eq!(
+                    adapter.get_constraint_support(ct),
+                    ConstraintSupport::Enforced,
+                    "{adapter_type} {ct:?}"
+                );
+            }
+        }
     }
 
     /// impl.py CONSTRAINT_SUPPORT: only CHECK is enforced.
