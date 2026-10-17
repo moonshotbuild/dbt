@@ -56,7 +56,14 @@ impl StmtSplitter for DefaultStmtSplitter {
     fn split<'i>(&self, sql: &'i str, adapter_type: AdapterType) -> Vec<&'i str> {
         use AdapterType::*;
         let dialect = match adapter_type {
-            Postgres => Dialect::Postgresql,
+            // There is no Postgres lexer, and `Dialect::Postgresql` falls back
+            // to Trino's, which has no dollar-quoted strings: a `;` inside
+            // `$tag$...$tag$` (a `persist_docs` comment whose description
+            // has a semicolon) split the statement mid-string. The Redshift
+            // lexer, Postgres-derived, tokenises dollar quotes. Local to
+            // splitting on purpose, like ClickHouse below: dialect_of() also
+            // feeds SQL analysis, where Postgres keeps its own dialect.
+            Postgres => Dialect::Redshift,
             Snowflake => Dialect::Snowflake,
             Bigquery => Dialect::Bigquery,
             // TODO(serramatutu): switch Spark to Spark dialect once frontend looks good
@@ -91,7 +98,8 @@ impl StmtSplitter for DefaultStmtSplitter {
             Snowflake => by_dialect(Dialect::Snowflake),
             Bigquery => by_dialect(Dialect::Bigquery),
             Databricks | Spark => by_dialect(Dialect::Databricks),
-            Redshift => by_dialect(Dialect::Redshift),
+            // Postgres routes to Redshift for the same reason as split()
+            Redshift | Postgres => by_dialect(Dialect::Redshift),
             // ClickHouse routes to Databricks for the same reason as split()
             ClickHouse => by_dialect(Dialect::Databricks),
             // fallback to the Trino lexer for unsupported lexer dialects
@@ -239,6 +247,27 @@ mod tests {
                 "Expected COMMENT ON COLUMN statement, got: {stmt}"
             );
         }
+    }
+
+    /// Postgres `persist_docs` emits the same dollar-quoted `COMMENT ON`
+    /// statements as Redshift. A description containing `;` must not split
+    /// its statement (it did while Postgres used the Trino lexer, failing
+    /// with "unterminated dollar-quoted string").
+    #[test]
+    fn test_split_postgres_dollar_quoted_strings() {
+        let sql = r#"
+    comment on table "db"."main"."dim_stores" is $dbt_comment_literal_block$Stores; one row per store$dbt_comment_literal_block$;
+    comment on column "db"."main"."dim_stores".store_id is $dbt_comment_literal_block$Business key for the store; stable across versions$dbt_comment_literal_block$;
+    comment on column "db"."main"."dim_stores".store_name is $dbt_comment_literal_block$The store's name$dbt_comment_literal_block$;
+  "#;
+
+        let statements = split(sql, AdapterType::Postgres);
+
+        assert_eq!(statements.len(), 3, "{statements:?}");
+        assert!(statements[0].trim().starts_with("comment on table"));
+        assert!(statements[1].contains("store; stable across versions$dbt_comment_literal_block$"));
+        assert!(statements[2].contains("The store's name"));
+        assert!(!is_empty(statements[1], AdapterType::Postgres));
     }
 
     /// A Databricks `metric_view`'s compiled DDL wraps its YAML spec in
