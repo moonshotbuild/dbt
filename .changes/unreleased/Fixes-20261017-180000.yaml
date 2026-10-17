@@ -1,0 +1,9 @@
+kind: Fixes
+body: Treat check, unique and primary key constraints as enforced on Postgres and
+    DuckDB, as dbt-postgres and dbt-duckdb do, so a check constraint is no longer
+    dropped from the DDL and no false "not enforced" warning fires.
+time: 2026-10-17T18:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
