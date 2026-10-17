@@ -30,11 +30,11 @@ const SSL_MODES: [&str; 6] = [
 ];
 
 /// Profile fields passed through to libpq unchanged, as URI query parameters
-/// of the same name. `connect_timeout` and `search_path` are converted first.
+/// of the same name. `connect_timeout`, `role` and `search_path` are converted
+/// first.
 ///
-/// `role` and `retries` are parsed but not applied: `role` has no connection
-/// string form (dbt-postgres runs `SET ROLE` after connecting), and `retries`
-/// is retry policy rather than a connection parameter.
+/// `retries` is not applied here: it is retry policy rather than a connection
+/// parameter.
 const LIBPQ_PARAMS: [&str; 5] = [
     "sslmode",
     "sslcert",
@@ -105,6 +105,23 @@ impl<'a> PostgresAuthIR<'a> {
     }
 }
 
+/// The role a profile's `role` names. dbt-postgres runs `set role {role}`
+/// unquoted, so a bare name folds to lower case and a double-quoted one is
+/// taken exactly.
+fn role_name(role: &str) -> String {
+    match role.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(quoted) => quoted.replace("\"\"", "\""),
+        None => role.to_lowercase(),
+    }
+}
+
+/// libpq splits `options` on whitespace and takes a backslash as an escape,
+/// so both are escaped inside a value. dbt-postgres escapes spaces the same
+/// way for `search_path`.
+fn escape_option(value: &str) -> String {
+    value.replace('\\', "\\\\").replace(' ', "\\ ")
+}
+
 fn parse_auth<'a>(
     config: &'a AdapterConfig,
     _warning_printer: &dyn AuthWarningPrinter,
@@ -128,11 +145,17 @@ fn parse_auth<'a>(
             SSL_MODES.join(", ")
         )));
     }
+    // Server settings for the session, as libpq `options`. Setting `role` at
+    // startup has the effect of dbt-postgres's `set role` after connecting.
+    let mut options = Vec::new();
+    if let Some(role) = config.get_str("role") {
+        options.push(format!("-c role={}", escape_option(&role_name(role))));
+    }
     if let Some(search_path) = config.get_str("search_path") {
-        // libpq splits `options` on whitespace, so a space inside the value is
-        // escaped, as dbt-postgres does.
-        let search_path = search_path.replace(' ', "\\ ");
-        params.push(("options", format!("-c search_path={search_path}").into()));
+        options.push(format!("-c search_path={}", escape_option(search_path)));
+    }
+    if !options.is_empty() {
+        params.push(("options", options.join(" ").into()));
     }
 
     Ok(PostgresAuthIR::Database {
@@ -268,6 +291,22 @@ database: db
             &uri,
             "?options=-c%20search_path%3Danalytics%2C%5C%20my%5C%20schema&user=alice"
         );
+    }
+
+    #[test]
+    fn test_role_becomes_options() {
+        let yaml = format!("{BASE}role: Transformer\nsearch_path: analytics\n");
+        let uri = uri_value(&configure_yaml(&yaml).expect("configure"));
+        // `-c role=transformer -c search_path=analytics`: the bare name folds.
+        assert_contains!(
+            &uri,
+            "?options=-c%20role%3Dtransformer%20-c%20search_path%3Danalytics&user=alice"
+        );
+
+        let yaml = format!("{BASE}role: '\"My Role\"'\n");
+        let uri = uri_value(&configure_yaml(&yaml).expect("configure"));
+        // A quoted name keeps its case, and its space is escaped.
+        assert_contains!(&uri, "?options=-c%20role%3DMy%5C%20Role&user=alice");
     }
 
     #[test]
