@@ -1006,7 +1006,6 @@ impl ConstraintType {
 /// `state:modified.contract` breaking-change detection, which only reports removed `Enforced`
 /// constraints. Known differences from the Python adapters, not yet audited for whether they are
 /// intentional. Where they apply, dbt-core reports a removed constraint and Fusion does not:
-/// - Postgres and DuckDB: dbt-postgres and dbt-duckdb mark every type `ENFORCED`.
 /// - Trino, Starburst and Oracle return `None`, but their Python adapters enforce some types
 ///   (dbt-trino enforces `not_null`).
 ///
@@ -1021,12 +1020,9 @@ pub fn constraint_support(
     use ConstraintType::*;
 
     let support = match (adapter_type, ct) {
-        // Postgres
-        (Postgres, NotNull) => Enforced,
-        (Postgres, ForeignKey) => Enforced,
-        (Postgres, Unique) => NotEnforced,
-        (Postgres, PrimaryKey) => NotEnforced,
-        (Postgres, Check) => NotSupported,
+        // Postgres enforces all five
+        // https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-postgres/src/dbt/adapters/postgres/impl.py#L89-L95
+        (Postgres, NotNull | ForeignKey | Unique | PrimaryKey | Check) => Enforced,
         (Postgres, Custom) => NotSupported,
 
         // Snowflake
@@ -1065,12 +1061,9 @@ pub fn constraint_support(
         (Redshift, Check) => NotSupported,
         (Redshift, Custom) => NotSupported,
 
-        // DuckDB - follows Postgres
-        (DuckDB, NotNull) => Enforced,
-        (DuckDB, ForeignKey) => Enforced,
-        (DuckDB, Unique) => NotEnforced,
-        (DuckDB, PrimaryKey) => NotEnforced,
-        (DuckDB, Check) => NotSupported,
+        // DuckDB enforces all five too
+        // https://github.com/duckdb/dbt-duckdb/blob/master/dbt/adapters/duckdb/impl.py
+        (DuckDB, NotNull | ForeignKey | Unique | PrimaryKey | Check) => Enforced,
         (DuckDB, Custom) => NotSupported,
 
         // Lake compute - follows DuckDB
