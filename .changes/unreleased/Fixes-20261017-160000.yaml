@@ -1,0 +1,10 @@
+kind: Fixes
+body: Write Arrow types as Postgres type names Postgres accepts (float8, smallint,
+    bytea, element arrays, text for null) and keep a timestamp's zone, so seeds and
+    unit test fixtures with a float column no longer fail with type "double" does
+    not exist.
+time: 2026-10-17T16:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
