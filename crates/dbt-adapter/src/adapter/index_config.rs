@@ -90,6 +90,21 @@ impl IndexConfig {
         }))
     }
 
+    /// The indexed columns, in config order.
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// Whether the index is unique.
+    pub fn unique(&self) -> bool {
+        self.unique
+    }
+
+    /// The index method (`type`), if the config names one.
+    pub fn index_type(&self) -> Option<&str> {
+        self.index_type.as_deref()
+    }
+
     /// The index name: an md5 of the columns, the rendered relation, the flags
     /// and the current time. The timestamp keeps the name from colliding with
     /// the index of the relation being replaced
