@@ -243,9 +243,16 @@ impl AdbcEngine {
                 let database: Box<dyn Database> = database.clone();
                 Ok((database, fingerprint))
             } else {
-                let database = driver
-                    .new_database_with_opts(opts)
-                    .map_err(adbc_error_to_adapter_error)?;
+                let database = if self.adapter_type == AdapterType::Postgres {
+                    // The Postgres driver connects in AdbcDatabaseInit to read
+                    // the server version and type table, so a transient connect
+                    // failure surfaces here, before the connection retry loop.
+                    ConnectionRetryPolicy::new(self.adapter_type, config)
+                        .execute(config, || driver.new_database_with_opts(opts.clone()))
+                } else {
+                    driver.new_database_with_opts(opts)
+                }
+                .map_err(adbc_error_to_adapter_error)?;
                 match self.adapter_type {
                     AdapterType::DuckDB => self.apply_duckdb_init_sql(database.as_ref(), config)?,
                     AdapterType::ClickHouse => {

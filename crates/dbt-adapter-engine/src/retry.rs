@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::cow::lowercase;
 use dbt_adapter_core::AdapterType;
-use dbt_adbc::Connection;
 use dbt_adbc::duration::parse_duration;
 use dbt_auth::AdapterConfig;
 use dbt_common::Cancellable;
@@ -98,6 +97,8 @@ impl ConnectionRetryPolicy {
         let retries_key = match adapter_type {
             // https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-redshift/src/dbt/adapters/redshift/connections.py#L149-L150
             AdapterType::Redshift => "retries",
+            // https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-postgres/src/dbt/adapters/postgres/connections.py#L236
+            AdapterType::Postgres => "retries",
             _ => "connect_retries",
         };
         let max_retries = config
@@ -140,11 +141,11 @@ impl ConnectionRetryPolicy {
     /// - the connect succeeds,
     /// - `attempt >= self.max_retries`, or
     /// - the error is not retryable per [`is_retryable`](Self::is_retryable).
-    pub fn execute(
+    pub fn execute<T>(
         &self,
         config: &AdapterConfig,
-        connect_fn: impl FnMut() -> adbc_core::error::Result<Box<dyn Connection>>,
-    ) -> adbc_core::error::Result<Box<dyn Connection>> {
+        connect_fn: impl FnMut() -> adbc_core::error::Result<T>,
+    ) -> adbc_core::error::Result<T> {
         // XXX: consider printing the error as a warning before hanging on the user
         retry_loop(
             self.max_retries,
@@ -176,6 +177,7 @@ impl ConnectionRetryPolicy {
             Snowflake => is_retryable_snowflake_login_error(config, err),
             Databricks => is_retryable_databricks_error(config, err),
             Redshift => is_retryable_redshift_login_error(config, err),
+            Postgres => is_retryable_postgres_login_error(config, err),
             // Other adapters don't have a retryable-error criteria implemented here yet.
             _ => false,
         }
@@ -402,6 +404,47 @@ fn is_retryable_redshift_login_error(
     REDSHIFT_TRANSIENT_PATTERNS.iter().any(|p| msg.contains(p))
 }
 
+/// Retries a Postgres connect that failed for a reason that can pass: the
+/// server is unreachable, starting up or shutting down, or out of connection
+/// slots.
+///
+/// The ADBC Postgres driver reports every connect failure as `[libpq] Failed
+/// to connect: <libpq message>`, so this matches libpq's message text.
+/// dbt-postgres retries any `psycopg2.OperationalError`, which includes a
+/// wrong password or a missing role or database. Those are not retried here,
+/// because another attempt cannot succeed. `retry_all: true` restores the
+/// dbt-postgres behaviour.
+/// https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-postgres/src/dbt/adapters/postgres/connections.py#L220-L238
+fn is_retryable_postgres_login_error(
+    config: &AdapterConfig,
+    err: &adbc_core::error::Error,
+) -> bool {
+    if config.get_bool("retry_all").unwrap_or(false) {
+        return true;
+    }
+
+    const POSTGRES_TRANSIENT_PATTERNS: &[&str] = &[
+        // The socket: nothing listening yet, a dropped route, a reset.
+        "connection refused",
+        "no route to host",
+        "network is unreachable",
+        "connection reset by peer",
+        "server closed the connection unexpectedly",
+        // libpq's own connect_timeout.
+        "timeout expired",
+        // DNS that may answer on a second try (EAI_AGAIN).
+        "temporary failure in name resolution",
+        // SQLSTATE 57P03 cannot_connect_now: starting up, shutting down,
+        // recovering, or not yet accepting connections.
+        "the database system is",
+        // SQLSTATE 53300 too_many_connections.
+        "too many clients already",
+        "remaining connection slots are reserved",
+    ];
+    let msg = err.message.to_lowercase();
+    POSTGRES_TRANSIENT_PATTERNS.iter().any(|p| msg.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,7 +598,7 @@ mod tests {
         let policy = test_policy(3, Some(Duration::ZERO));
         let cfg = cfg_default();
         let mut calls: u32 = 0;
-        let result = policy.execute(&cfg, || {
+        let result = policy.execute::<()>(&cfg, || {
             calls += 1;
             Err(adbc_err(Status::IO, "i/o timeout"))
         });
@@ -569,7 +612,7 @@ mod tests {
         let policy = test_policy(5, Some(Duration::ZERO));
         let cfg = cfg_default();
         let mut calls: u32 = 0;
-        let result = policy.execute(&cfg, || {
+        let result = policy.execute::<()>(&cfg, || {
             calls += 1;
             Err(adbc_err(Status::Unauthenticated, "bad creds"))
         });
@@ -586,7 +629,7 @@ mod tests {
         let cfg = cfg_default();
         let mut calls: u32 = 0;
         let start = Instant::now();
-        let _ = policy.execute(&cfg, || {
+        let _ = policy.execute::<()>(&cfg, || {
             calls += 1;
             Err(adbc_err(Status::IO, "i/o timeout"))
         });
@@ -762,6 +805,65 @@ mod tests {
             ConnectionRetryPolicy::new(AdapterType::Redshift, &cfg).max_retries,
             2
         );
+    }
+
+    #[test]
+    fn postgres_uses_retries_and_ignores_connect_retries() {
+        let mapping = dbt_yaml::Mapping::from_iter([
+            ("connect_retries".into(), 5.into()),
+            ("retries".into(), 3.into()),
+        ]);
+        let cfg = AdapterConfig::new(mapping);
+        assert_eq!(
+            ConnectionRetryPolicy::new(AdapterType::Postgres, &cfg).max_retries,
+            3
+        );
+        let cfg = AdapterConfig::new(dbt_yaml::Mapping::new());
+        assert_eq!(
+            ConnectionRetryPolicy::new(AdapterType::Postgres, &cfg).max_retries,
+            1
+        );
+    }
+
+    #[test]
+    fn postgres_retries_transient_libpq_connect_failures() {
+        for msg in [
+            "[libpq] Failed to connect: connection to server at \"127.0.0.1\", port 5432 failed: Connection refused\n\tIs the server running on that host and accepting TCP/IP connections?",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: timeout expired",
+            "[libpq] Failed to connect: could not translate host name \"db\" to address: Temporary failure in name resolution",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: FATAL:  the database system is starting up",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: FATAL:  sorry, too many clients already",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: server closed the connection unexpectedly",
+        ] {
+            let e = adbc_err(Status::IO, msg);
+            assert!(
+                is_retryable_postgres_login_error(&cfg_default(), &e),
+                "expected retry for msg {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_does_not_retry_permanent_connect_failures() {
+        for msg in [
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: FATAL:  password authentication failed for user \"alice\"",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: FATAL:  role \"x\" does not exist",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: FATAL:  database \"x\" does not exist",
+            "[libpq] Failed to connect: connection to server at \"db\", port 5432 failed: server does not support SSL, but SSL was required",
+            "[libpq] Failed to connect: could not translate host name \"nope\" to address: Name or service not known",
+        ] {
+            let e = adbc_err(Status::IO, msg);
+            assert!(
+                !is_retryable_postgres_login_error(&cfg_default(), &e),
+                "expected no retry for msg {msg:?}"
+            );
+        }
+        let retry_all = AdapterConfig::new(dbt_yaml::Mapping::from_iter([(
+            "retry_all".into(),
+            true.into(),
+        )]));
+        let e = adbc_err(Status::IO, "FATAL:  password authentication failed");
+        assert!(is_retryable_postgres_login_error(&retry_all, &e));
     }
 
     // -- Shared Go-transport transient patterns -------------------------------
