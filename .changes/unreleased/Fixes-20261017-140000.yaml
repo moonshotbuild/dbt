@@ -1,0 +1,8 @@
+kind: Fixes
+body: Apply a Postgres profile's role to the connection, as dbt-postgres's
+    set role does.
+time: 2026-10-17T14:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
