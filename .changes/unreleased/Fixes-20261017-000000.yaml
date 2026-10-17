@@ -1,0 +1,9 @@
+kind: Fixes
+body: Split Postgres statements with a lexer that understands dollar-quoted strings,
+    so a persist_docs comment whose description contains a semicolon no longer fails
+    with "unterminated dollar-quoted string".
+time: 2026-10-17T00:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
