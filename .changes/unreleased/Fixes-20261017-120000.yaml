@@ -1,0 +1,10 @@
+kind: Fixes
+body: Pass a Postgres profile's sslmode, sslcert, sslkey, sslrootcert, keepalives_idle,
+    connect_timeout and search_path to the connection, which were parsed and then
+    dropped, and percent-encode the credentials so a user or password containing a
+    space or a URI-reserved character connects.
+time: 2026-10-17T12:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
