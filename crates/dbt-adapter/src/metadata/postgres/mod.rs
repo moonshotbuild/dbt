@@ -10,7 +10,12 @@ use dbt_common::cancellation::{Cancellable, CancellationToken};
 
 use arrow_array::{Array, BooleanArray, Decimal128Array, RecordBatch, StringArray};
 
-use dbt_adapter_core::ExecutionPhase;
+use crate::metadata::redshift::REDSHIFT_GET_RELATIONS_SQL;
+use crate::relation::Relation;
+use dbt_adapter_core::{AdapterType, ExecutionPhase};
+use dbt_adapter_engine::MapReduce;
+use dbt_schemas::dbt_types::RelationType;
+use dbt_schemas::schemas::common::ResolvedQuoting;
 use dbt_schemas::schemas::{
     legacy_catalog::{CatalogNodeStats, CatalogTable, ColumnMetadata, TableMetadata},
     relations::base::{BaseRelation, RelationPattern},
@@ -19,7 +24,7 @@ use indexmap::IndexMap;
 use minijinja::State;
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub struct PostgresMetadataAdapter {
@@ -295,18 +300,229 @@ ORDER BY a.attnum"
         create_schemas_if_not_exists(&self.adapter, self, state, catalog_schemas)
     }
 
-    fn supports_relation_progress(&self) -> bool {
-        false
-    }
-
+    /// Lists each schema's relations on its own connection, as Redshift does,
+    /// to hydrate the relation cache.
     fn list_relations_in_parallel_inner(
         &self,
-        _db_schemas: &[CatalogAndSchema],
-        _token: CancellationToken,
-        _report_progress: bool,
+        db_schemas: &[CatalogAndSchema],
+        token: CancellationToken,
+        report_progress: bool,
     ) -> AsyncAdapterResult<'_, BTreeMap<CatalogAndSchema, AdapterResult<RelationVec>>> {
-        // FIXME: Implement cache hydration
-        let future = async move { Ok(BTreeMap::new()) };
-        Box::pin(future)
+        type Acc = BTreeMap<CatalogAndSchema, AdapterResult<RelationVec>>;
+        let factory = Box::new(AdapterConnectionFactory::new(self.adapter.engine().clone()));
+
+        let adapter = self.adapter.clone();
+        let token_clone = token.clone();
+
+        let map_f = move |conn: &mut ConnectionGuard<'_>,
+                          db_schema: &CatalogAndSchema|
+              -> AdapterResult<Vec<Arc<dyn BaseRelation>>> {
+            let query_ctx = QueryCtx::default().with_desc("list_relations_in_parallel");
+            with_relation_list_item_span(
+                report_progress.then_some(RELATION_CACHE_OP_ID),
+                &db_schema.to_string(),
+                || adapter.list_relations(None, &query_ctx, conn, db_schema, token_clone.clone()),
+            )
+        };
+
+        let reduce_f = move |acc: &mut Acc,
+                             db_schema: CatalogAndSchema,
+                             relations: AdapterResult<Vec<Arc<dyn BaseRelation>>>|
+              -> Result<(), Cancellable<AdapterError>> {
+            acc.insert(db_schema, relations);
+            Ok(())
+        };
+
+        let map_reduce = MapReduce::new(factory, Box::new(map_f), Box::new(reduce_f), None);
+        map_reduce.run(Arc::new(db_schemas.to_vec()), token)
     }
+
+    /// The `pg_depend` edges between relations in `db_schemas`, so that when a
+    /// rebuild drops a relation with `cascade` the cache also evicts the views
+    /// and materialized views Postgres dropped with it. Without them, a
+    /// hydrated cache keeps a materialized view its parent's rebuild removed.
+    /// One query per database, as Redshift does.
+    fn fetch_relation_dependency_links_inner<'a>(
+        &'a self,
+        db_schemas: &'a [CatalogAndSchema],
+        token: CancellationToken,
+    ) -> AsyncAdapterResult<'a, Vec<ParentChildPair>> {
+        let mut jobs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for s in db_schemas {
+            jobs.entry(s.resolved_catalog.clone())
+                .or_default()
+                .insert(s.resolved_schema.to_lowercase());
+        }
+        let jobs: Vec<(String, BTreeSet<String>)> = jobs.into_iter().collect();
+
+        let factory = Box::new(AdapterConnectionFactory::new(self.adapter.engine().clone()));
+        let adapter = self.adapter.clone();
+        let token_clone = token.clone();
+
+        let map_f = move |conn: &mut ConnectionGuard<'_>,
+                          job: &(String, BTreeSet<String>)|
+              -> AdapterResult<Vec<ParentChildPair>> {
+            let (catalog, schemas) = job;
+            let ctx = QueryCtx::default().with_desc("postgres__get_relations");
+            let engine = adapter.engine();
+            let batch = engine.execute(
+                None,
+                conn.as_mut(),
+                &ctx,
+                REDSHIFT_GET_RELATIONS_SQL,
+                token_clone.clone(),
+            )?;
+            parse_relation_dependencies(
+                &batch,
+                catalog,
+                |schema| schemas.contains(&schema.to_lowercase()),
+                engine.quoting(),
+            )
+        };
+
+        let reduce_f = move |acc: &mut Vec<ParentChildPair>,
+                             _job: (String, BTreeSet<String>),
+                             res: AdapterResult<Vec<ParentChildPair>>|
+              -> Result<(), Cancellable<AdapterError>> {
+            match res {
+                Ok(links) => acc.extend(links),
+                Err(e) => {
+                    // Best-effort, as on Redshift: a cascade just won't evict
+                    // dependents until the next hydration.
+                    tracing::warn!("fetch_relation_dependency_links: pg_depend query failed: {e}");
+                }
+            }
+            Ok(())
+        };
+
+        let map_reduce = MapReduce::new(factory, Box::new(map_f), Box::new(reduce_f), None);
+        Box::pin(async move { map_reduce.run(Arc::new(jobs), token).await })
+    }
+}
+
+/// Per-schema variant for the cache-miss path: the `pg_depend` edges whose
+/// referenced relation is in `db_schema`.
+pub fn list_relation_dependencies(
+    engine: &dyn AdapterEngine,
+    ctx: &QueryCtx,
+    conn: &mut ConnectionGuard<'_>,
+    db_schema: &CatalogAndSchema,
+    token: CancellationToken,
+) -> AdapterResult<Vec<ParentChildPair>> {
+    let batch = engine.execute(None, conn.as_mut(), ctx, REDSHIFT_GET_RELATIONS_SQL, token)?;
+    let want = db_schema.resolved_schema.to_lowercase();
+    parse_relation_dependencies(
+        &batch,
+        &db_schema.resolved_catalog,
+        |schema| schema.to_lowercase() == want,
+        engine.quoting(),
+    )
+}
+
+/// (referenced, dependent) pairs from [`REDSHIFT_GET_RELATIONS_SQL`], kept
+/// where the referenced relation's schema matches.
+fn parse_relation_dependencies(
+    batch: &RecordBatch,
+    catalog: &str,
+    schema_matches: impl Fn(&str) -> bool,
+    quoting: ResolvedQuoting,
+) -> AdapterResult<Vec<ParentChildPair>> {
+    if batch.num_rows() == 0 {
+        return Ok(Vec::new());
+    }
+    let dep_schemas = batch.column_values::<StringArray>("dependent_schema")?;
+    let dep_names = batch.column_values::<StringArray>("dependent_name")?;
+    let ref_schemas = batch.column_values::<StringArray>("referenced_schema")?;
+    let ref_names = batch.column_values::<StringArray>("referenced_name")?;
+
+    let mut links = Vec::new();
+    for i in 0..batch.num_rows() {
+        let ref_schema = ref_schemas.value(i);
+        if !schema_matches(ref_schema) {
+            continue;
+        }
+        // The relation type does not matter for eviction, which goes by name.
+        links.push((
+            build_relation(
+                catalog,
+                ref_schema,
+                ref_names.value(i),
+                RelationType::View,
+                quoting,
+            )?,
+            build_relation(
+                catalog,
+                dep_schemas.value(i),
+                dep_names.value(i),
+                RelationType::View,
+                quoting,
+            )?,
+        ));
+    }
+    Ok(links)
+}
+
+fn build_relation(
+    catalog: &str,
+    schema: &str,
+    name: &str,
+    relation_type: RelationType,
+    quoting: ResolvedQuoting,
+) -> AdapterResult<Arc<dyn BaseRelation>> {
+    let relation = Relation::new(
+        AdapterType::Postgres,
+        catalog.to_string(),
+        schema.to_string(),
+        name.to_string(),
+    )
+    .with_relation_type(relation_type)
+    .with_quoting(quoting)
+    .validate()?;
+    Ok(Arc::new(relation) as Arc<dyn BaseRelation>)
+}
+
+/// The tables, views and materialized views in one schema.
+///
+/// Ports dbt-postgres's `postgres__list_relations_without_caching`
+/// (https://github.com/dbt-labs/dbt-adapters/blob/802d40f0f0eb663c17e5be08d1e3fb2e55b9ee34/dbt-postgres/src/dbt/include/postgres/macros/adapters.sql),
+/// except that the schema is matched exactly (case-insensitively) rather than
+/// with `ilike`, which reads a `_` in the schema name as a wildcard and would
+/// list another schema's relations under this one.
+pub fn list_relations(
+    engine: &dyn AdapterEngine,
+    ctx: &QueryCtx,
+    conn: &mut ConnectionGuard<'_>,
+    db_schema: &CatalogAndSchema,
+    token: CancellationToken,
+) -> AdapterResult<Vec<Arc<dyn BaseRelation>>> {
+    let schema = db_schema.resolved_schema.replace('\'', "''");
+    let sql = format!(
+        "select tablename as name, schemaname as schema, 'table' as type
+from pg_catalog.pg_tables where lower(schemaname) = lower('{schema}')
+union all
+select viewname, schemaname, 'view'
+from pg_catalog.pg_views where lower(schemaname) = lower('{schema}')
+union all
+select matviewname, schemaname, 'materialized_view'
+from pg_catalog.pg_matviews where lower(schemaname) = lower('{schema}')"
+    );
+    let batch = engine.execute(None, conn.as_mut(), ctx, &sql, token)?;
+    if batch.num_rows() == 0 {
+        return Ok(Vec::new());
+    }
+
+    let names = batch.column_values::<StringArray>("name")?;
+    let schemas = batch.column_values::<StringArray>("schema")?;
+    let types = batch.column_values::<StringArray>("type")?;
+    (0..batch.num_rows())
+        .map(|i| {
+            build_relation(
+                &db_schema.resolved_catalog,
+                schemas.value(i),
+                names.value(i),
+                RelationType::from(types.value(i)),
+                engine.quoting(),
+            )
+        })
+        .collect()
 }
