@@ -49,6 +49,7 @@ use crate::stmt_splitter::StmtSplitter;
 use crate::value::*;
 use crate::{AdapterResult, load_catalogs, python};
 
+use crate::adapter::index_config::IndexConfig;
 use adbc_core::options::OptionValue;
 use arrow::array::{BooleanArray, RecordBatch, StringArray};
 use arrow_array::{Array as _, ArrayRef, Decimal128Array};
@@ -5095,12 +5096,23 @@ impl AdapterImpl {
     }
 
     /// PostgresAdapter https://github.com/dbt-labs/dbt-adapters/blob/0efd8d3d1081e1ab43e38797d5104f7b424a6284/dbt-postgres/src/dbt/adapters/postgres/impl.py#L128
+    /// DuckDBAdapter https://github.com/duckdb/dbt-duckdb/blob/master/dbt/adapters/duckdb/impl.py
     pub fn parse_index(
         &self,
         _state: &State,
-        _raw_index: &Value,
+        raw_index: &Value,
     ) -> Result<Value, minijinja::Error> {
-        unimplemented!("parse_index")
+        let adapter_type = self.adapter_type();
+        if !matches!(adapter_type, Postgres | DuckDB) {
+            return Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("parse_index is not supported by the {adapter_type} adapter"),
+            ));
+        }
+        Ok(
+            IndexConfig::parse(adapter_type, raw_index)?
+                .map_or_else(none_value, Value::from_object),
+        )
     }
 
     /// DatabricksAdapter https://github.com/databricks/dbt-databricks/blob/2f11abb306a400cde32b27891b766bf41a11fb1f/dbt/adapters/databricks/impl.py#L990
