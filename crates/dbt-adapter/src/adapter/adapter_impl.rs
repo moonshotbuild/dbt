@@ -6358,7 +6358,7 @@ mod tests {
                     ("attach".into(), attach),
                 ])
             }
-            Bigquery | Redshift | Spark | Databricks => Mapping::new(),
+            Bigquery | Redshift | Spark | Databricks | Postgres => Mapping::new(),
             _ => unimplemented!("mock config for adapter type {:?}", adapter_type),
         };
         build_engine(adapter_type, config)
@@ -7988,6 +7988,29 @@ mod tests {
             Arc::new(DefaultTypeOps::new(ClickHouse)),
             Arc::new(DefaultStmtSplitter),
         )
+    }
+
+    /// dbt-postgres and dbt-duckdb override the base CONSTRAINT_SUPPORT to
+    /// enforce all five types, so a check constraint is rendered and no
+    /// "not enforced" warning fires for unique or primary_key.
+    #[test]
+    fn test_constraint_support_postgres_and_duckdb() {
+        for adapter_type in [Postgres, DuckDB] {
+            let adapter = AdapterImpl::new(engine(adapter_type), None);
+            for ct in [
+                ConstraintType::NotNull,
+                ConstraintType::Unique,
+                ConstraintType::PrimaryKey,
+                ConstraintType::ForeignKey,
+                ConstraintType::Check,
+            ] {
+                assert_eq!(
+                    adapter.get_constraint_support(ct),
+                    ConstraintSupport::Enforced,
+                    "{adapter_type} {ct:?}"
+                );
+            }
+        }
     }
 
     /// impl.py CONSTRAINT_SUPPORT: only CHECK is enforced.

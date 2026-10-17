@@ -8708,9 +8708,16 @@ catalogs:
         let old = model_with_columns(vec![col("id", "int", "", vec![pk])]);
         let new = model_with_columns(vec![col("id", "int", "", vec![])]);
         assert!(
-            new.column_contract_changes(&old, AdapterType::DuckDB)
+            new.column_contract_changes(&old, AdapterType::Snowflake)
                 .enforced_column_constraint_removed
                 .is_empty()
+        );
+        // dbt-duckdb enforces primary keys, so removing one is a breaking change.
+        assert_eq!(
+            new.column_contract_changes(&old, AdapterType::DuckDB)
+                .enforced_column_constraint_removed
+                .len(),
+            1
         );
         assert!(
             new.column_contract_changes(&old, AdapterType::Trino)
