@@ -1,0 +1,8 @@
+kind: Fixes
+body: List a Postgres schema's relations in one query to hydrate the relation
+    cache, instead of looking each relation up on its own.
+time: 2026-10-17T19:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
