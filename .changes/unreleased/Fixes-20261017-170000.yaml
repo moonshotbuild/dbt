@@ -1,0 +1,9 @@
+kind: Fixes
+body: Rebuild an existing Postgres materialized view, refreshing it or applying
+    changes to its indexes, instead of failing with "map has no method named
+    get_materialized_view_config_change_collection".
+time: 2026-10-17T17:00:00.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
