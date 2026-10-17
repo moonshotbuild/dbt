@@ -4396,9 +4396,12 @@ impl AdapterImpl {
             Impl(ClickHouse, engine) => {
                 clickhouse::list_relations(engine.as_ref(), query_ctx, conn, db_schema, token)
             }
+            Impl(Postgres, engine) => {
+                postgres::list_relations(engine.as_ref(), query_ctx, conn, db_schema, token)
+            }
             Impl(
-                adapter_type @ (Postgres | Salesforce | Exasol | Starburst | Athena | Trino
-                | Datafusion | Dremio | Oracle),
+                adapter_type @ (Salesforce | Exasol | Starburst | Athena | Trino | Datafusion
+                | Dremio | Oracle),
                 _,
             ) => {
                 let err = AdapterError::new(
@@ -4427,6 +4430,13 @@ impl AdapterImpl {
         use crate::metadata::*;
         match self.inner_adapter() {
             Impl(Redshift, engine) => redshift::list_relation_dependencies(
+                engine.as_ref(),
+                query_ctx,
+                conn,
+                db_schema,
+                token,
+            ),
+            Impl(Postgres, engine) => postgres::list_relation_dependencies(
                 engine.as_ref(),
                 query_ctx,
                 conn,
