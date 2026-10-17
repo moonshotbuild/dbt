@@ -1498,7 +1498,11 @@ impl BaseRelation for Relation {
                     Ok(Value::from_object(changeset))
                 }
             }
-            _ => unimplemented!("Available only for BigQuery and Redshift"),
+            Postgres => crate::relation::postgres::materialized_view::changeset(
+                remote_state_value,
+                local_config_value,
+            ),
+            _ => unimplemented!("Available only for BigQuery, Postgres and Redshift"),
         }
     }
 }
