@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::utils::{RawProjectConfig, extract_resource_config_from_raw_project};
 use dbt_adapter_core::AdapterType;
@@ -12,6 +12,7 @@ use dbt_common::io_args::{
     ComputeArg, LOCAL_UNIT_TESTS_ENV, MULTI_ADAPTER_ENV, local_unit_tests_enabled,
     multi_adapter_enabled,
 };
+use dbt_common::path::DbtPath;
 use dbt_common::tracing::dbt_emit::emit_warn_log_message;
 use dbt_schemas::dbt_utils::resolve_package_quoting;
 use dbt_schemas::schemas::common::DbtQuoting;
@@ -332,6 +333,27 @@ pub(crate) fn err_resource_name_has_spaces(name: &str, path: &Path) -> Box<FsErr
     )
 }
 
+/// `out_dir/target_path`, refused unless it stays under `out_dir` once `..`
+/// components collapse. `target_path` carries a resource name and the properties
+/// file's relative directory, both from a (possibly installed) package, so this
+/// is the last check before synthesised scratch SQL is written. Shared by the
+/// snapshot and generic-test resolvers, whose names reach a `{name}.sql` join
+/// without passing [`validate_resource_name`].
+pub(crate) fn contained_scratch_path(out_dir: &Path, target_path: &Path) -> FsResult<PathBuf> {
+    let scratch_path = out_dir.join(target_path);
+    let root = DbtPath::absolute(out_dir)?;
+    let resolved = DbtPath::absolute(&scratch_path)?;
+    if !resolved.as_path().starts_with(root.as_path()) {
+        return Err(fs_err!(
+            ErrorCode::InvalidConfig,
+            "Refusing to write scratch SQL to '{}': it resolves outside the target directory {}",
+            scratch_path.display(),
+            out_dir.display()
+        ));
+    }
+    Ok(scratch_path)
+}
+
 /// Validates the merged `compute` config on a model / data_test / snapshot node. Currently
 /// only `Remote` is supported for those node types; other variants are rejected at parse time
 /// rather than mid-build. The set of accepted values will widen as local-compute support
@@ -423,6 +445,19 @@ mod tests {
     use super::*;
     use crate::utils::RawProjectConfig;
     use std::sync::Mutex;
+
+    #[test]
+    fn contained_scratch_path_rejects_an_escape() {
+        let out = Path::new("/proj/target");
+        assert_eq!(
+            contained_scratch_path(out, Path::new("generic_tests/pkg/not_null.sql")).unwrap(),
+            out.join("generic_tests/pkg/not_null.sql")
+        );
+        assert!(
+            contained_scratch_path(out, Path::new("generic_tests/../../macros/evil.sql")).is_err()
+        );
+        assert!(contained_scratch_path(out, Path::new("/tmp/evil.sql")).is_err());
+    }
 
     /// The gate predicates read process-wide state, so the gate tests below cannot run
     /// concurrently under a plain `cargo test` (nextest gives each test its own process).
