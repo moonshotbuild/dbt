@@ -1,6 +1,6 @@
 use super::utils::{base_tests_inner, column_tests_inner};
 use crate::args::ResolveArgs;
-use crate::resolve::resolve_utils::extract_config_map;
+use crate::resolve::resolve_utils::{contained_scratch_path, extract_config_map};
 use dbt_adapter_core::*;
 use dbt_common::FsError;
 use dbt_common::FsResult;
@@ -389,7 +389,10 @@ fn persist_inner(
     let unique_id = format!("{}.{}", full_name, test_hash);
 
     let path = generic_test_asset_path(seen_generic_test_paths, &full_name, &test_hash);
-    let test_file = io_args.out_dir.join(&path);
+    // An explicit test `name:` (`name: ../../macros/evil`) reaches `generate_test_name`
+    // unchanged, so contain the joined path under `out_dir` before writing -- the same
+    // last-line check the snapshot resolver applies.
+    let test_file = contained_scratch_path(&io_args.out_dir, &path)?;
     let generated_test_sql = generate_test_macro(
         test_macro_name.as_str(),
         &kwargs,
@@ -424,7 +427,6 @@ fn persist_inner(
             }
         }
     }
-    // Explicit test names (`name: customer/id_not_null`) can carry `/` straight into the generic-test SQL path.
     io_args.scratch_write(&test_file, &generated_test_sql)?;
     let dbt_asset = DbtAsset {
         path,
