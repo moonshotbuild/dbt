@@ -12,8 +12,8 @@ use crate::resolve::resolve_tests::persist_generic_data_tests::{
     TestUnrenderedConfigs, extract_test_unrendered_configs,
 };
 use crate::resolve::resolve_utils::{
-    RawProjectConfigsByAdapter, err_resource_name_has_spaces, extract_config_map,
-    resolve_node_quoting, select_node_adapter, validate_compute,
+    RawProjectConfigsByAdapter, contained_scratch_path, err_resource_name_has_spaces,
+    extract_config_map, resolve_node_quoting, select_node_adapter, validate_compute,
 };
 use crate::resolve::yaml_field_utils;
 use crate::sql_file_info::SqlFileInfo;
@@ -826,41 +826,5 @@ async fn recalculate_snapshot_checksum(
             emit_warn_log_from_fs_error(*e);
             sql_file_info.checksum.clone()
         }
-    }
-}
-
-/// `out_dir/target_path`, refused unless it stays under `out_dir` once `..`
-/// components collapse. `target_path` carries the snapshot's name and the
-/// properties file's relative directory, both from the (possibly installed)
-/// package, so this is the last check before the synthesised SQL is written.
-fn contained_scratch_path(out_dir: &Path, target_path: &Path) -> FsResult<PathBuf> {
-    let snapshot_path = out_dir.join(target_path);
-    let root = DbtPath::absolute(out_dir)?;
-    let resolved = DbtPath::absolute(&snapshot_path)?;
-    if !resolved.as_path().starts_with(root.as_path()) {
-        return Err(fs_err!(
-            ErrorCode::InvalidConfig,
-            "Refusing to write snapshot SQL to '{}': it resolves outside the target directory {}",
-            snapshot_path.display(),
-            out_dir.display()
-        ));
-    }
-    Ok(snapshot_path)
-}
-
-#[cfg(test)]
-mod scratch_path_tests {
-    use super::contained_scratch_path;
-    use std::path::Path;
-
-    #[test]
-    fn contained_scratch_path_rejects_an_escape() {
-        let out = Path::new("/proj/target");
-        assert_eq!(
-            contained_scratch_path(out, Path::new("snapshots/pkg/orders.sql")).unwrap(),
-            out.join("snapshots/pkg/orders.sql")
-        );
-        assert!(contained_scratch_path(out, Path::new("snapshots/../../macros/evil.sql")).is_err());
-        assert!(contained_scratch_path(out, Path::new("/tmp/evil.sql")).is_err());
     }
 }
