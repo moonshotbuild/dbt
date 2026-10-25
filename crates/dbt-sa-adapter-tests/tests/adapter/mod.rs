@@ -7,4 +7,5 @@
 
 pub mod bigquery;
 pub mod clickhouse;
+pub mod postgres;
 pub mod snowflake;
