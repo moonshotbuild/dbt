@@ -1,0 +1,26 @@
+model.test.b:
+- sequence: 0
+  type: execute
+  sql: DROP SCHEMA IF EXISTS adapters_postgres_get_columns_in_relation CASCADE
+- sequence: 1
+  type: execute
+  sql: CREATE SCHEMA adapters_postgres_get_columns_in_relation
+- sequence: 2
+  type: execute
+  sql: CREATE TABLE adapters_postgres_get_columns_in_relation.c (number_col int, text_col varchar(100), text_col2 varchar(101))
+- sequence: 3
+  type: execute
+  sql: |-
+    select
+    column_name,
+    data_type,
+    character_maximum_length,
+    numeric_precision,
+    numeric_scale
+    
+    from postgres.INFORMATION_SCHEMA.columns
+    where table_name = 'c'
+    
+    and table_schema = 'adapters_postgres_get_columns_in_relation'
+    
+    order by ordinal_position
