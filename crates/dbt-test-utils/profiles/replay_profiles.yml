@@ -49,4 +49,12 @@ fusion_tests:
       database: 'default'
       schema: "fusion_tests_schema"
       threads: 4
+    postgres:
+      type: postgres
+      host: 'localhost'
+      port: 5432
+      user: 'dummy_username'
+      password: 'dummy_password'
+      database: 'postgres'
+      schema: "fusion_tests_schema"
   target: unset
