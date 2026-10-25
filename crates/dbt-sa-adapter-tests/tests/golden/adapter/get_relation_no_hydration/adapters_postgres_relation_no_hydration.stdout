@@ -1,0 +1,7 @@
+   dbt-oss 
+   Loading profiles.yml
+postgres
+relation
+"postgres"."adapters_postgres_relation_no_hydration"."a"
+==================== Execution Summary =====================
+Finished 'run-operation' successfully for target 'postgres' [duration]
