@@ -1,0 +1,1 @@
+[error] [DbUnsupportedFeature (dbt1307)]: Not Supported: the postgres adapter does not support metadata-based freshness checks; set a `loaded_at_field` (or `loaded_at_query`) on the source
