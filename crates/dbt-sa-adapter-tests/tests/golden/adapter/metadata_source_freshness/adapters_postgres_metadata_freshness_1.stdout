@@ -1,0 +1,7 @@
+   dbt-oss 
+   Loading profiles.yml
+   Parsing models/schema.yml
+   Parsing models/c.sql
+    Failed source adapters_postgres_metadata_freshness_sources.source [duration]
+==================== Execution Summary =====================
+Finished 'freshness' with 1 error for target 'postgres' [duration]
