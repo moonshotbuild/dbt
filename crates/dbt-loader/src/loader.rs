@@ -1464,8 +1464,13 @@ fn collect_paths(dbt_project: &DbtProject) -> HashMap<ResourcePathKind, Vec<Stri
 /// install directory wholesale before reinstalling into it, so a
 /// `packages-install-path` of `../OUTSIDE` or an absolute path in
 /// `dbt_project.yml` (or on the command line) deleted an arbitrary directory,
-/// even when the install then failed. The internal packages directory is
-/// derived from it and gets the same check.
+/// even when the install then failed. The internal packages directory
+/// derived from it is therefore inside the project too.
+///
+/// `--internal-packages-install-path` is not checked. Only the operator sets
+/// it, never a project, and it is meant to sit outside the project: embedders
+/// and the adapter test harness keep dbt's own macro packages in scratch
+/// space.
 pub(crate) fn get_packages_install_path(
     in_dir: &Path,
     arg_packages_install_path: &Option<PathBuf>,
@@ -1482,7 +1487,7 @@ pub(crate) fn get_packages_install_path(
     let packages_install_path = contained_install_path(in_dir, &packages_install_path, source)?;
 
     let internal_packages_install_path = if let Some(path) = arg_internal_packages_install_path {
-        contained_install_path(in_dir, path, "--internal-packages-install-path")?
+        in_dir.join(path)
     } else {
         packages_install_path.with_file_name(DBT_INTERNAL_PACKAGES_DIR_NAME)
     };
@@ -1689,7 +1694,17 @@ mod tests {
         }
         let cli = Some(PathBuf::from("../OUTSIDE"));
         assert!(get_packages_install_path(&in_dir, &cli, &None, &project(None)).is_err());
-        assert!(get_packages_install_path(&in_dir, &None, &cli, &project(None)).is_err());
+
+        // The operator's internal packages directory is taken as given, even
+        // outside the project.
+        let scratch = tmp
+            .path()
+            .join("scratch")
+            .join(DBT_INTERNAL_PACKAGES_DIR_NAME);
+        let (_, internal) =
+            get_packages_install_path(&in_dir, &None, &Some(scratch.clone()), &project(None))
+                .unwrap();
+        assert_eq!(internal, scratch);
     }
 
     #[test]
