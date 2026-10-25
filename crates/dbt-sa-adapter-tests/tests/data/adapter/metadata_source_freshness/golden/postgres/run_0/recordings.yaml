@@ -1,0 +1,12 @@
+1cab1e8b:
+- sequence: 0
+  type: execute
+  sql: create table adapters_postgres_metadata_freshness.a (val int)
+97052ce0:
+- sequence: 0
+  type: execute
+  sql: create table adapters_postgres_metadata_freshness.source (id varchar(255), name varchar(255), amount numeric(10,2))
+fda9823e:
+- sequence: 0
+  type: execute
+  sql: create schema if not exists adapters_postgres_metadata_freshness
