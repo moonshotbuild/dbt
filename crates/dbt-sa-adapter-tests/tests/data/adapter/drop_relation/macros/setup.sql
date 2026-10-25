@@ -13,6 +13,9 @@
   {% do adapter.execute('CREATE SCHEMA ' ~ schema_name) %}
   {% set full_name = schema_name ~ '.' ~ table_name %}
   {% do adapter.execute('CREATE TABLE ' ~ full_name ~ ' (val int);') %}
+  {# compile hydrates this schema before the model runs, so add the created relation to the cache #}
+  {% set relation = api.Relation.create(database=target.database, schema=schema_name, identifier=table_name, type='table') %}
+  {% do adapter.cache_added(relation) %}
 {% endmacro %}
 
 {% macro snowflake__set_up(schema_name, table_name) %}
