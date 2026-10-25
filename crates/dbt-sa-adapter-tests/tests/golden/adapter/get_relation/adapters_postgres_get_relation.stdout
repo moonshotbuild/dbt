@@ -1,0 +1,22 @@
+   dbt-oss 
+   Loading profiles.yml
+   Parsing models/a.sql
+   Parsing models/c.sql
+postgres
+postgres
+adapters_postgres_get_relation
+relation
+None
+   Started downloading referenced relations (1 items)
+  Finished [duration] downloading referenced relations (1 items)
+ Rendering models/c.sql
+postgres
+postgres
+adapters_postgres_get_relation
+relation
+"postgres"."adapters_postgres_get_relation"."a"
+ Rendering models/a.sql
+==================== Execution Summary =====================
+Finished 'compile' successfully for target 'postgres' [duration]
+Processed: 2 models
+Summary: 2 total | 2 success
