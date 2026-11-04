@@ -1495,7 +1495,8 @@ pub(crate) fn get_packages_install_path(
     Ok((packages_install_path, internal_packages_install_path))
 }
 
-/// Resolve `path` against the project root and refuse it unless it stays inside the project once `..` components are collapsed.
+/// Resolve `path` against the project root and refuse it unless it stays inside the project: no `..` or `\` in the configured value, and inside the canonical project root once symlinks resolve.
+/// Returns the validated path.
 fn contained_install_path(in_dir: &Path, path: &Path, source: &str) -> FsResult<PathBuf> {
     if path.is_absolute() {
         return Err(fs_err!(
@@ -1504,6 +1505,15 @@ fn contained_install_path(in_dir: &Path, path: &Path, source: &str) -> FsResult<
             path.display()
         ));
     }
+    // Checked on the configured value as written.
+    // `DbtPath` collapses `..` and reads `\` as a separator, neither of which the kernel does.
+    fs_deps::check_relative_install_path(path).map_err(|reason| {
+        fs_err!(
+            ErrorCode::InvalidConfig,
+            "Invalid {source} '{}': {reason}",
+            path.display()
+        )
+    })?;
     let root = DbtPath::absolute(in_dir)?;
     let resolved = DbtPath::absolute(in_dir.join(path))?;
     if !resolved.as_path().starts_with(root.as_path()) || resolved.as_path() == root.as_path() {
@@ -1514,9 +1524,8 @@ fn contained_install_path(in_dir: &Path, path: &Path, source: &str) -> FsResult<
             in_dir.display()
         ));
     }
-    // The lexical check above cannot see a symlink inside the project; the
-    // install sink's canonical check can, and runs here too so the refusal
-    // names the configured value rather than failing later at deletion.
+    // The lexical check above cannot see a symlink inside the project; the install sink's canonical check can, and runs here too so the refusal names the configured value rather than failing later at deletion.
+    // Its result is the path the check validated, so that, not the raw join, is what every later step deletes and installs into.
     fs_deps::ensure_inside_project(&in_dir.join(path), in_dir).map_err(|e| {
         fs_err!(
             ErrorCode::InvalidConfig,
@@ -1524,8 +1533,7 @@ fn contained_install_path(in_dir: &Path, path: &Path, source: &str) -> FsResult<
             path.display(),
             e.message()
         )
-    })?;
-    Ok(in_dir.join(path))
+    })
 }
 
 fn collect_profiles_yml_if_exists(
@@ -1665,7 +1673,8 @@ mod tests {
         fs::create_dir_all(&in_dir).unwrap();
         let project = |p: Option<&str>| -> DbtProjectSimplified {
             let yml = match p {
-                Some(p) => format!("packages-install-path: \"{p}\"\n__ignored__: {{}}\n"),
+                // Single-quoted so a `\` reaches dbt as written.
+                Some(p) => format!("packages-install-path: '{p}'\n__ignored__: {{}}\n"),
                 None => "__ignored__: {}\n".to_string(),
             };
             dbt_yaml::from_str(&yml).expect("a minimal dbt_project.yml")
@@ -1691,6 +1700,23 @@ mod tests {
         }
         let cli = Some(PathBuf::from("../OUTSIDE"));
         assert!(get_packages_install_path(&in_dir, &cli, &None, &project(None)).is_err());
+
+        // Shapes that collapse lexically to a path inside the project while the kernel resolves them outside it: `..` after a symlink (applied to the link's target), and `..` out of a directory whose name contains `\` (a filename byte off Windows, a separator to `DbtPath`).
+        #[cfg(unix)]
+        {
+            let outside = tmp.path().join("outside");
+            fs::create_dir_all(outside.join("a")).unwrap();
+            std::os::unix::fs::symlink(outside.join("a"), in_dir.join("link")).unwrap();
+            fs::create_dir_all(in_dir.join("x\\y")).unwrap();
+            for bad in ["link/../victim", "x\\y/../../victim", "x\\y"] {
+                let err = get_packages_install_path(&in_dir, &None, &None, &project(Some(bad)))
+                    .unwrap_err();
+                assert!(
+                    err.to_string().contains("packages-install-path"),
+                    "{bad}: {err}"
+                );
+            }
+        }
 
         // The operator's internal packages directory is taken as given, even
         // outside the project.
