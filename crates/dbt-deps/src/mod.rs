@@ -35,12 +35,12 @@ use dbt_schemas::schemas::packages::{DbtPackagesLock, UpstreamProject};
 use dbt_telemetry::{DepsAllPackagesInstalled, GenericOpExecuted};
 use std::sync::Arc;
 use std::{collections::BTreeMap, path::Path};
-pub use steps::ensure_inside_project;
 use steps::{
     SkillInstallInputs, compute_package_lock, install_packages, install_skills, load_dbt_packages,
     load_dbt_packages_lock_without_validation, try_infer_dbt_packages_lock_from_installed,
     try_load_valid_dbt_packages_lock,
 };
+pub use steps::{check_relative_install_path, ensure_inside_project};
 use tracing::Instrument as _;
 
 use crate::context::DepsOperationContext;
@@ -68,7 +68,9 @@ pub async fn get_or_install_packages(
     cloud_config: Option<ResolvedCloudConfig>,
     ai_provider: Option<&[String]>,
 ) -> FsResult<(DbtPackagesLock, Vec<UpstreamProject>)> {
-    ensure_inside_project(packages_install_path, &io.in_dir)?;
+    // Everything below -- the lease, the lock checks, the delete, the install and the missing-package checks -- uses the path the check validated.
+    let packages_install_path = &ensure_inside_project(packages_install_path, &io.in_dir)?;
+    let packages_install_path = packages_install_path.as_path();
     let Some(packages_relative_dir) =
         DbtPath::from(packages_install_path).get_relative_path(&io.in_dir)
     else {
