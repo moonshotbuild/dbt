@@ -1,0 +1,11 @@
+kind: Security
+body: The `packages-install-path` containment check now validates the path dbt deletes,
+    not a normalised spelling of it. `link/../victim` (with `link` a symlink out of the
+    project) and, off Windows, `x\y/../../victim` (with `x\y` a directory name) both
+    collapsed lexically to a path inside the project, while the delete resolved them
+    outside it. A `..` component or a `\` in the value is now refused.
+time: 2026-11-04T13:46:52.000000+08:00
+custom:
+    author: joshuataylor
+    issue: ""
+    project: dbt-core
