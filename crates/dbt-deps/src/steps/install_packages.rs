@@ -1,6 +1,5 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
-use dbt_common::path::DbtPath;
 use dbt_common::tracing::dbt_emit::emit_info_log_message;
 use dbt_common::tracing::span_info::find_and_update_span_attrs;
 use dbt_common::{ErrorCode, FsResult, constants::DBT_PACKAGES_LOCK_FILE, fs_err};
@@ -12,64 +11,100 @@ use crate::context::DepsOperationContext;
 use crate::package_listing::{PackageListing, UnpinnedPackage};
 use crate::utils::{max_resolve_concurrency, scrub_package_name_secret_env_vars};
 
-/// Refuse an install directory that is not inside the project.
+/// Refuse an install directory that is not inside the project, and return the path to use for it.
 ///
-/// `install_packages` removes the directory wholesale before reinstalling, so
-/// this is the last check between a `packages-install-path` of `../OUTSIDE`
-/// (or an absolute path) and `remove_dir_all` on it. The loader validates the
-/// configured value first; this guards the sink for every caller.
+/// `install_packages` removes the directory wholesale before reinstalling, so this is the last check between a `packages-install-path` of `../OUTSIDE` (or an absolute path) and `remove_dir_all` on it.
+/// The loader validates the configured value first, and this guards the sink for every caller.
 ///
-/// Two checks. The lexical one collapses `..` and catches a path that names
-/// somewhere outside the project. The canonical one resolves the part of the
-/// path that exists on disk, so a symlink inside the project (`project/link ->
-/// /outside`, install path `link/pkgs`) cannot route the delete outside it
-/// either. A leaf that is itself a symlink is not followed: `remove_dir_all`
-/// unlinks it and `create_dir_all` then creates a real directory in its place.
-pub fn ensure_inside_project(install_path: &Path, in_dir: &Path) -> FsResult<()> {
-    let root = DbtPath::absolute(in_dir)?;
-    let resolved = DbtPath::absolute(install_path)?;
-    if !resolved.as_path().starts_with(root.as_path()) || resolved.as_path() == root.as_path() {
-        return Err(fs_err!(
+/// The check reasons about the path the filesystem will act on, not a normalised spelling of it:
+///
+/// - The part below the project may not contain `..`. The kernel applies `..` after following symlinks, so `link/../victim` with `link -> /outside/a` names `/outside/victim` even though it collapses lexically to `victim`.
+/// - It may not contain a `\`. Off Windows that is an ordinary filename byte, so `x\y/../../victim` climbs out of a directory named `x\y`, while dbt's path normalisation reads the `\` as a separator.
+/// - The part that exists on disk is canonicalised and compared with the canonical project root, so a symlink inside the project (`project/link -> /outside`, install path `link/pkgs`) cannot route the delete outside it either. A leaf that is itself a symlink is not followed: `remove_dir_all` unlinks it and `create_dir_all` then creates a real directory in its place.
+///
+/// The returned path is the checked canonical target rebased onto `in_dir`, which resolves to the same directory.
+/// Callers must use it, not their input, for the delete and everything after it.
+pub fn ensure_inside_project(install_path: &Path, in_dir: &Path) -> FsResult<PathBuf> {
+    let refuse = |reason: &str| {
+        fs_err!(
             ErrorCode::InvalidConfig,
-            "Refusing to use packages install path '{}': it is not inside the project directory {}",
+            "Refusing to use packages install path '{}': {}",
             install_path.display(),
+            reason
+        )
+    };
+
+    // `std::path::absolute` keeps `..` (on POSIX) and does not rewrite `\`, unlike `DbtPath`, so the components below are the ones the kernel sees.
+    let root = std::path::absolute(in_dir)?;
+    let target = std::path::absolute(install_path)?;
+    let Ok(relative) = target.strip_prefix(&root) else {
+        return Err(refuse(&format!(
+            "it is not inside the project directory {}",
             in_dir.display()
-        ));
-    }
+        )));
+    };
+    check_relative_install_path(relative).map_err(|reason| {
+        refuse(&format!(
+            "it is not inside the project directory {}: {reason}",
+            in_dir.display()
+        ))
+    })?;
 
     let canonical_root = std::fs::canonicalize(in_dir).map_err(|e| {
-        fs_err!(
-            ErrorCode::InvalidConfig,
-            "Refusing to use packages install path '{}': cannot resolve the project directory {}: {}",
-            install_path.display(),
+        refuse(&format!(
+            "cannot resolve the project directory {}: {}",
             in_dir.display(),
             e
-        )
+        ))
     })?;
-    let canonical = canonical_existing_prefix(resolved.as_path()).map_err(|e| {
-        fs_err!(
-            ErrorCode::InvalidConfig,
-            "Refusing to use packages install path '{}': cannot resolve it to confirm it stays inside the project: {}",
-            install_path.display(),
-            e
-        )
+    let canonical = canonical_existing_prefix(&target).map_err(|e| {
+        refuse(&format!(
+            "cannot resolve it to confirm it stays inside the project: {e}"
+        ))
     })?;
-    if !canonical.starts_with(&canonical_root) || canonical == canonical_root {
-        return Err(fs_err!(
-            ErrorCode::InvalidConfig,
-            "Refusing to use packages install path '{}': it resolves to {}, which is not inside the project directory {}",
-            install_path.display(),
+    match canonical.strip_prefix(&canonical_root) {
+        Ok(inside) if !inside.as_os_str().is_empty() => Ok(in_dir.join(inside)),
+        _ => Err(refuse(&format!(
+            "it resolves to {}, which is not inside the project directory {}",
             canonical.display(),
             canonical_root.display()
-        ));
+        ))),
+    }
+}
+
+/// Refuse a project-relative install path the containment check cannot reason about: an absolute path, a `..` component, or a `\` in a component.
+///
+/// The loader runs this on the configured value so the refusal names it, and [`ensure_inside_project`] runs it again at the sink.
+pub fn check_relative_install_path(relative: &Path) -> Result<(), String> {
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => {
+                if name.as_encoded_bytes().contains(&b'\\') {
+                    return Err(
+                        "it contains a backslash, which is a filename character here, not a separator"
+                            .to_string(),
+                    );
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("it must not contain a '..' component".to_string());
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(
+                    "it must be a path inside the project, not an absolute path".to_string()
+                );
+            }
+        }
     }
     Ok(())
 }
 
-/// Canonicalise the part of an absolute path that exists and re-append the
-/// rest lexically. A symlink leaf is kept as its resolved parent plus its own
-/// name, because the operations that follow unlink it rather than follow it.
-fn canonical_existing_prefix(path: &Path) -> std::io::Result<std::path::PathBuf> {
+/// Canonicalise the part of an absolute path that exists and re-append the rest lexically.
+/// A symlink leaf is kept as its resolved parent plus its own name, because the operations that follow unlink it rather than follow it.
+///
+/// Existence is tested without following symlinks, so a dangling symlink above the leaf fails to canonicalise rather than passing as a directory that does not exist yet.
+fn canonical_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
     let leaf_is_symlink = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink());
     let mut existing = path;
     let mut remainder: Vec<&std::ffi::OsStr> = Vec::new();
@@ -80,7 +115,7 @@ fn canonical_existing_prefix(path: &Path) -> std::io::Result<std::path::PathBuf>
         }
     }
     loop {
-        if existing.exists() {
+        if std::fs::symlink_metadata(existing).is_ok() {
             let mut canonical = std::fs::canonicalize(existing)?;
             for component in remainder.iter().rev() {
                 canonical.push(component);
@@ -159,7 +194,8 @@ pub async fn install_packages(
         )
     })?;
 
-    ensure_inside_project(packages_install_path, &ctx.io.in_dir)?;
+    // Delete, recreate and install into the path the check validated, not the one passed in, so the two cannot name different directories.
+    let packages_install_path = &ensure_inside_project(packages_install_path, &ctx.io.in_dir)?;
     if packages_install_path.exists() {
         std::fs::remove_dir_all(packages_install_path).map_err(|e| {
             fs_err!(
@@ -275,5 +311,72 @@ mod install_path_tests {
         // A real directory inside is fine.
         std::fs::create_dir_all(in_dir.join("real")).unwrap();
         assert!(ensure_inside_project(&in_dir.join("real/pkgs"), &in_dir).is_ok());
+    }
+
+    /// The kernel applies `..` after following a symlink, so `link/../victim` with `link -> outside/a` names `outside/victim`, although it collapses lexically to `victim` inside the project.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_project_refuses_parent_after_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let in_dir = tmp.path().join("proj");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        std::fs::create_dir_all(outside.join("a")).unwrap();
+        std::fs::create_dir_all(outside.join("victim")).unwrap();
+        symlink(outside.join("a"), in_dir.join("link")).unwrap();
+
+        let err = ensure_inside_project(&in_dir.join("link/../victim"), &in_dir).unwrap_err();
+        assert!(err.to_string().contains("'..'"), "{err}");
+    }
+
+    /// Off Windows `\` is a filename byte, so `x\y/../../victim` climbs out of a directory named `x\y` and lands beside the project, while `DbtPath` reads it as `x/y/../../victim`, inside it.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_project_refuses_a_backslash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let in_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(in_dir.join("x\\y")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("victim")).unwrap();
+
+        assert!(ensure_inside_project(&in_dir.join("x\\y/../../victim"), &in_dir).is_err());
+        let err = ensure_inside_project(&in_dir.join("x\\y"), &in_dir).unwrap_err();
+        assert!(err.to_string().contains("backslash"), "{err}");
+    }
+
+    /// The returned path is the validated one, spelt from `in_dir`, so a caller that deletes it deletes what was checked.
+    /// A symlink leaf keeps its name.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_project_returns_the_checked_path() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let in_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(in_dir.join("vendor")).unwrap();
+        symlink(tmp.path(), in_dir.join("leaf")).unwrap();
+
+        for rel in [
+            "dbt_packages",
+            "vendor/pkgs",
+            "new/deep/pkgs",
+            "./vendor/pkgs",
+            "leaf",
+        ] {
+            let checked = ensure_inside_project(&in_dir.join(rel), &in_dir).unwrap();
+            assert_eq!(checked, in_dir.join(rel.trim_start_matches("./")), "{rel}");
+        }
+    }
+
+    /// A dangling symlink above the leaf cannot be resolved, so it is refused rather than passing as a directory that does not exist yet.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_inside_project_refuses_a_dangling_symlink_parent() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let in_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        symlink(tmp.path().join("missing"), in_dir.join("dangling")).unwrap();
+
+        assert!(ensure_inside_project(&in_dir.join("dangling/pkgs"), &in_dir).is_err());
     }
 }
