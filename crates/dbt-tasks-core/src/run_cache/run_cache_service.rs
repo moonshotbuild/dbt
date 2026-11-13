@@ -9726,6 +9726,7 @@ mod tests {
             dbt_profile: test_dbt_profile(DbConfig::Snowflake(Box::<SnowflakeDbConfig>::default())),
             cloud_config: None,
             function_bodies: Default::default(),
+            model_rendered_sql: Default::default(),
             node_resolver: Arc::new(DummyNodeResolverTracker),
             get_relation_calls: Default::default(),
             get_columns_in_relation_calls: Default::default(),
