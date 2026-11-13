@@ -504,6 +504,10 @@ pub async fn resolve(
     let user_defined_schema_registry =
         dbt_schemas::state::hydrate_user_defined_schema_registry(&nodes, adapter_type);
 
+    let (model_rendered_sql, function_bodies): (BTreeMap<_, _>, BTreeMap<_, _>) = function_bodies
+        .into_iter()
+        .partition(|(unique_id, _)| nodes.models.contains_key(unique_id));
+
     Ok((
         ResolverState {
             root_project_name: root_project_name.to_string(),
@@ -515,6 +519,7 @@ pub async fn resolve(
             dbt_profile: dbt_state.dbt_profile.clone(),
             cloud_config: dbt_state.cloud_config.clone(),
             function_bodies: Arc::new(function_bodies),
+            model_rendered_sql: Arc::new(model_rendered_sql),
             run_started_at: dbt_state.run_started_at,
             nodes_with_resolution_errors,
             nodes_with_access_errors,
@@ -1197,7 +1202,7 @@ pub async fn resolve_inner(
     disabled_nodes.groups.extend(disabled_groups);
 
     // Resolve SQLs and get nodes except refs and sources
-    let (models, disabled_models) = resolve_models(
+    let (models, disabled_models, model_rendered_sql) = resolve_models(
         arg,
         package,
         package_quoting,
@@ -1272,7 +1277,7 @@ pub async fn resolve_inner(
     disabled_nodes.checks.extend(disabled_checks);
 
     // Resolve functions
-    let (functions, function_bodies) = resolve_functions(
+    let (functions, mut function_bodies) = resolve_functions(
         arg,
         package,
         package_quoting,
@@ -1294,6 +1299,9 @@ pub async fn resolve_inner(
     )
     .await?;
     nodes.functions.extend(functions);
+    // The model renders ride with the function bodies through the package waves and are split
+    // back out by unique id where `ResolverState` is built.
+    function_bodies.extend(model_rendered_sql);
 
     let (exposures, disabled_exposures) = resolve_exposures(
         arg,
