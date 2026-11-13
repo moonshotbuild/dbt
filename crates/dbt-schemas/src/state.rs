@@ -908,6 +908,9 @@ pub struct ResolverState {
     pub cloud_config: Option<ResolvedCloudConfig>,
     /// Parse-time rendered SQL body of each function, by unique id.
     pub function_bodies: Arc<BTreeMap<String, String>>,
+    /// Parse-time rendered SQL of each enabled model, by unique id. Its `ref()` and `source()`
+    /// relations are resolve-phase placeholders, not the compiled ones.
+    pub model_rendered_sql: Arc<BTreeMap<String, String>>,
     pub node_resolver: Arc<dyn NodeResolverTracker>,
     pub get_relation_calls: GetRelationCalls,
     pub get_columns_in_relation_calls: GetColumnsInRelationCalls,
