@@ -538,6 +538,10 @@ pub async fn resolve(
     let user_defined_schema_registry =
         dbt_schemas::state::hydrate_user_defined_schema_registry(&nodes, adapter_type);
 
+    let (model_rendered_sql, function_bodies): (BTreeMap<_, _>, BTreeMap<_, _>) = function_bodies
+        .into_iter()
+        .partition(|(unique_id, _)| nodes.models.contains_key(unique_id));
+
     Ok((
         ResolverState {
             root_project_name: root_project_name.to_string(),
@@ -549,6 +553,7 @@ pub async fn resolve(
             dbt_profile: dbt_state.dbt_profile.clone(),
             cloud_config: dbt_state.cloud_config.clone(),
             function_bodies: Arc::new(function_bodies),
+            model_rendered_sql: Arc::new(model_rendered_sql),
             run_started_at: dbt_state.run_started_at,
             nodes_with_resolution_errors,
             nodes_with_access_errors,
