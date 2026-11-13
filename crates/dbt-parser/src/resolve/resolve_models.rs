@@ -193,10 +193,12 @@ pub async fn resolve_models(
 ) -> FsResult<(
     HashMap<String, Arc<DbtModel>>,
     HashMap<String, Arc<DbtModel>>,
+    HashMap<String, String>,
 )> {
     let mut models: HashMap<String, Arc<DbtModel>> = HashMap::new();
     let mut models_with_execute: HashMap<String, DbtModel> = HashMap::new();
     let mut disabled_models: HashMap<String, Arc<DbtModel>> = HashMap::new();
+    let mut model_rendered_sql: HashMap<String, String> = HashMap::new();
     let dependency_package_name = dependency_package_name_from_ctx(&env, base_ctx);
 
     let is_dependency = dependency_package_name.is_some();
@@ -379,6 +381,7 @@ pub async fn resolve_models(
         &mut models,
         &mut models_with_execute,
         &mut disabled_models,
+        &mut model_rendered_sql,
         &mut duplicates,
     )
     .await?;
@@ -461,7 +464,7 @@ pub async fn resolve_models(
             .into_iter()
             .map(|(v, _)| (v.__common_attr__.unique_id.to_string(), Arc::new(v))),
     );
-    Ok((models, disabled_models))
+    Ok((models, disabled_models, model_rendered_sql))
 }
 
 /// Builds a `DbtModel` node for each rendered model file, routing it into `models`,
@@ -512,6 +515,7 @@ async fn build_model_nodes(
     models: &mut HashMap<String, Arc<DbtModel>>,
     models_with_execute: &mut HashMap<String, DbtModel>,
     disabled_models: &mut HashMap<String, Arc<DbtModel>>,
+    model_rendered_sql: &mut HashMap<String, String>,
     duplicates: &mut Vec<(String, String, Option<String>, PathBuf)>,
 ) -> FsResult<()> {
     let mut node_names = HashSet::new();
@@ -530,7 +534,7 @@ async fn build_model_nodes(
         adapter,
         alias_adapter,
         raw_code,
-        rendered_sql: _,
+        rendered_sql,
         properties: maybe_properties,
         status,
         render_error_deferred,
@@ -1181,6 +1185,7 @@ async fn build_model_nodes(
                     models.insert(unique_id.to_owned(), Arc::new(dbt_model));
                 }
                 node_names.insert(model_name.to_owned());
+                model_rendered_sql.insert(unique_id.to_owned(), rendered_sql.clone());
 
                 if !arg.skip_creating_generic_tests {
                     properties.as_testable().persist(
